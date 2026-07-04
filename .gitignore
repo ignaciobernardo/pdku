@@ -1,0 +1,7 @@
+# runtime state / scraped caches (regenerated on each run)
+data.json
+video_views.json
+followers.json
+
+__pycache__/
+*.pyc
