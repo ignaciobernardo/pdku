@@ -64,8 +64,10 @@ how long ago a post went up. The toggles account for that:
   mid-audience creator who over-indexes (e.g. Tonchi) beats a huge account
   pulling a fraction of its reach. 1 K-follower floor damps tiny accounts.
 
-Followers come free from the TikTok/YouTube video pages; Instagram via the
-logged-in web API; X doesn't expose them publicly (shows "—").
+Followers come free from the TikTok/YouTube video pages; Instagram and X both
+come from their logged-in web APIs (the Zen session). X uses the authenticated
+GraphQL `UserByScreenName` endpoint — if it starts 404ing, the query id in
+`X_USER_QID` has rotated and needs refreshing from the web app bundle.
 
 Note: `--cookies-from-browser firefox:<zen profile>` in yt-dlp would be the
 clean way to do Instagram, but the Homebrew Python build has a broken

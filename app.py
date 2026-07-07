@@ -155,6 +155,68 @@ IG_SHORTCODE_RE = re.compile(r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]
 IG_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 IG_APP_ID = "936619743392459"
 
+# X/Twitter follower counts: authenticated web GraphQL, using the Zen session.
+# The public web bearer is a long-lived constant; the query id can rotate — if
+# UserByScreenName starts 404ing, refresh X_USER_QID from the web app bundle.
+X_BEARER = ("AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
+            "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA")
+X_USER_QID = "sLVLhk0bGj3MVFEKTdax1w"
+X_FEATURES = {
+    "hidden_profile_subscriptions_enabled": True,
+    "rweb_tipjar_consumption_enabled": True,
+    "responsive_web_graphql_exclude_directive_enabled": True,
+    "verified_phone_label_enabled": False,
+    "subscriptions_verification_info_is_identity_verified_enabled": True,
+    "subscriptions_verification_info_verified_since_enabled": True,
+    "highlights_tweets_tab_ui_enabled": True,
+    "responsive_web_twitter_article_notes_tab_enabled": True,
+    "subscriptions_feature_can_gift_premium": True,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+}
+
+
+def x_auth():
+    """(auth_token, ct0) from the Zen profile logged into x.com, or None."""
+    for db in sorted(ZEN_PROFILES.glob("*/cookies.sqlite")):
+        try:
+            conn = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+            rows = conn.execute(
+                "select name, value from moz_cookies "
+                "where host like '%x.com' and name in ('auth_token', 'ct0')"
+            ).fetchall()
+            conn.close()
+        except sqlite3.Error:
+            continue
+        c = dict(rows)
+        if "auth_token" in c and "ct0" in c:
+            return c["auth_token"], c["ct0"]
+    return None
+
+
+def fetch_x_followers(username, auth):
+    auth_token, ct0 = auth
+    from urllib.parse import quote
+    variables = quote(json.dumps({"screen_name": username}))
+    features = quote(json.dumps(X_FEATURES))
+    url = (f"https://x.com/i/api/graphql/{X_USER_QID}/UserByScreenName"
+           f"?variables={variables}&features={features}")
+    req = urllib.request.Request(url, headers={
+        "Authorization": "Bearer " + X_BEARER,
+        "x-csrf-token": ct0,
+        "Cookie": f"auth_token={auth_token}; ct0={ct0}",
+        "x-twitter-active-user": "yes",
+        "x-twitter-auth-type": "OAuth2Session",
+        "Content-Type": "application/json",
+        "User-Agent": BROWSER_UA,
+    })
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        data = json.load(resp)
+    result = (((data.get("data") or {}).get("user") or {}).get("result") or {})
+    legacy = result.get("legacy") or {}
+    return legacy.get("followers_count")
+
 
 def instagram_cookie_header():
     """Cookie header for instagram.com from the Zen profile that has a session."""
@@ -217,31 +279,51 @@ def fetch_instagram_followers(username, cookie_header):
 
 
 def refresh_creators():
-    """Fill in follower counts that don't come free with the video pages
-    (currently Instagram; X doesn't expose them anywhere anonymous)."""
+    """Fill in follower counts that don't come free with the video pages.
+    Instagram and X both need the logged-in Zen session."""
     now = time.time()
-    stale = [
-        key for key, c in _creators.items()
-        if key.startswith("instagram:")
-        and now - c.get("fetchedAt", 0) > CREATOR_TTL_SECONDS
-    ]
-    if not stale:
-        return 0
-    cookie_header = instagram_cookie_header()
-    if cookie_header is None:
-        return 0
+
+    def stale_for(prefix):
+        return [
+            key for key, c in _creators.items()
+            if key.startswith(prefix)
+            and now - c.get("fetchedAt", 0) > CREATOR_TTL_SECONDS
+        ]
+
     updated = 0
-    for key in stale:
-        username = key.split(":", 1)[1]
-        try:
-            followers = fetch_instagram_followers(username, cookie_header)
-            _creators[key] = {"followers": followers, "fetchedAt": time.time()}
-            updated += 1
-        except Exception as exc:
-            _creators[key]["fetchedAt"] = time.time()  # back off failures too
-            print(f"  followers fetch failed (instagram) {username}: {exc}")
-        time.sleep(1.2)
-    FOLLOWERS_FILE.write_text(json.dumps(_creators))
+
+    ig_stale = stale_for("instagram:")
+    if ig_stale:
+        cookie_header = instagram_cookie_header()
+        if cookie_header:
+            for key in ig_stale:
+                username = key.split(":", 1)[1]
+                try:
+                    followers = fetch_instagram_followers(username, cookie_header)
+                    _creators[key] = {"followers": followers, "fetchedAt": time.time()}
+                    updated += 1
+                except Exception as exc:
+                    _creators[key]["fetchedAt"] = time.time()
+                    print(f"  followers fetch failed (instagram) {username}: {exc}")
+                time.sleep(1.2)
+
+    x_stale = stale_for("x:")
+    if x_stale:
+        auth = x_auth()
+        if auth:
+            for key in x_stale:
+                username = key.split(":", 1)[1]
+                try:
+                    followers = fetch_x_followers(username, auth)
+                    _creators[key] = {"followers": followers, "fetchedAt": time.time()}
+                    updated += 1
+                except Exception as exc:
+                    _creators[key]["fetchedAt"] = time.time()
+                    print(f"  followers fetch failed (x) {username}: {exc}")
+                time.sleep(1.0)
+
+    if updated:
+        FOLLOWERS_FILE.write_text(json.dumps(_creators))
     return updated
 
 
