@@ -39,6 +39,8 @@ BASE_DIR = Path(__file__).parent
 DATA_FILE = BASE_DIR / "data.json"
 VIDEO_CACHE_FILE = BASE_DIR / "video_views.json"
 FOLLOWERS_FILE = BASE_DIR / "followers.json"
+# append-only time-series for charts (committed to the repo, unlike the caches)
+HISTORY_FILE = BASE_DIR / "history.json"
 
 # --deploy publishes to natochi.cv/pdku (static hosting via the blog repo)
 BLOG_REPO = Path.home() / "projects/blog-natochi"
@@ -702,6 +704,76 @@ def write_snapshot():
     return snapshot
 
 
+def append_history(snapshot):
+    """Accumulate a chart-ready time-series into history.json:
+    - snapshots: one compact per-person record per day (views, momentum,
+      followers by platform, strength) — lets you chart growth over the season.
+    - videos: each video's [timestamp, views] series for granular per-post charts.
+    Overwrites the same day's snapshot if the scraper runs twice in a day."""
+    hist = {"snapshots": [], "videos": {}}
+    if HISTORY_FILE.exists():
+        try:
+            hist = json.loads(HISTORY_FILE.read_text())
+        except Exception:
+            pass
+
+    record = {
+        "t": snapshot["updatedAt"],
+        "day": snapshot["today"],
+        "totalVideoViews": sum(p["totalVideoViews"] for p in snapshot["people"]),
+        "platformViews": {
+            k: v["views"] for k, v in snapshot["platformTotals"].items()
+        },
+        "people": [
+            {
+                "slug": p["slug"],
+                "name": p["name"],
+                "views": p["totalVideoViews"],
+                "momentum24h": p["momentum24h"],
+                "followers": p["followers"],
+                "followersByPlatform": p["followersByPlatform"],
+                "tracked": p["trackedCount"],
+                "posts": p["postCount"],
+                "viewsPerFollower": p["viewsPerFollower"],
+                "strength": p["strength"],
+            }
+            for p in snapshot["people"]
+        ],
+    }
+    snaps = hist.get("snapshots", [])
+    if snaps and snaps[-1].get("day") == record["day"]:
+        snaps[-1] = record        # keep one point per day (latest wins)
+    else:
+        snaps.append(record)
+    hist["snapshots"] = snaps
+
+    url_meta = {}
+    for p in snapshot["people"]:
+        for x in p["posts"]:
+            if x["url"]:
+                url_meta[x["url"]] = {
+                    "title": x["title"], "slug": p["slug"], "day": x["day"]
+                }
+    videos = {}
+    for url, entry in _videos.items():
+        series = entry.get("history")
+        if not series:
+            continue
+        meta = url_meta.get(url, {})
+        videos[url] = {
+            "platform": entry.get("platform"),
+            "creator": entry.get("creator"),
+            "title": meta.get("title"),
+            "slug": meta.get("slug"),
+            "day": meta.get("day"),
+            "history": series,
+        }
+    hist["videos"] = videos
+    hist["updatedAt"] = snapshot["updatedAt"]
+    HISTORY_FILE.write_text(json.dumps(hist))
+    return len(snaps)
+
+
 def deploy():
     """Publish to natochi.cv/pdku (blog repo) and mirror source+data to the
     standalone `pdku` repo, so both update on every scrape."""
@@ -769,6 +841,7 @@ def scrape_loop():
             FOLLOWERS_FILE.write_text(json.dumps(_creators))
             with _lock:
                 snapshot = write_snapshot()
+                days_logged = append_history(snapshot)
             total = sum(p["totalViews"] for p in snapshot["people"])
             video_total = sum(p["totalVideoViews"] for p in snapshot["people"])
             settled = sum(1 for e in _videos.values() if e.get("settled"))
@@ -776,7 +849,8 @@ def scrape_loop():
                 f"[{time.strftime('%H:%M:%S')}] scraped {len(snapshot['days'])} days, "
                 f"{len(snapshot['people'])} people, {total} portal views, "
                 f"{video_total} video views ({fetched} videos, "
-                f"{profiles_updated} profiles refreshed, {settled} settled)"
+                f"{profiles_updated} profiles refreshed, {settled} settled, "
+                f"{days_logged} days in history)"
             )
             if DEPLOY:
                 try:
