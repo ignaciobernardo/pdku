@@ -330,16 +330,25 @@ MOMENTUM_WINDOW = 24 * 3600
 MOMENTUM_MIN_AGE = 20 * 3600  # baseline must be at least this old to count
 HISTORY_MIN_GAP = 3600        # collapse samples <1h apart (avoids test bloat)
 HISTORY_KEEP = 40
+# once a video's view count has been flat for this long, it's done growing —
+# stop hammering it every cycle and just re-check occasionally in case it revives.
+SETTLE_SECONDS = 5 * 86400
+SETTLED_RECHECK = 7 * 86400
 
 
 def record_view_sample(entry, views, creator):
     now = time.time()
+    prev = entry.get("views")
     entry["views"] = views
     entry["creator"] = creator
     entry["fetchedAt"] = now
-    entry["nextTry"] = now + VIDEO_TTL_SECONDS
     if views is None:
+        entry["nextTry"] = now + VIDEO_TTL_SECONDS
         return
+    if prev != views or "lastChangedAt" not in entry:
+        entry["lastChangedAt"] = now
+    entry["settled"] = (now - entry["lastChangedAt"]) >= SETTLE_SECONDS
+    entry["nextTry"] = now + (SETTLED_RECHECK if entry["settled"] else VIDEO_TTL_SECONDS)
     hist = entry.setdefault("history", [])
     if hist and now - hist[-1][0] < HISTORY_MIN_GAP:
         hist[-1] = [now, views]           # refresh the most recent point
@@ -612,7 +621,8 @@ def write_snapshot():
 
 
 def deploy():
-    """Copy the dashboard into the blog repo and publish it (natochi.cv/pdku)."""
+    """Publish to natochi.cv/pdku (blog repo) and mirror source+data to the
+    standalone `pdku` repo, so both update on every scrape."""
     DEPLOY_DIR.mkdir(exist_ok=True)
     (DEPLOY_DIR / "index.html").write_bytes((BASE_DIR / "index.html").read_bytes())
     (DEPLOY_DIR / "data.json").write_bytes(DATA_FILE.read_bytes())
@@ -622,6 +632,29 @@ def deploy():
     )
     out = (proc.stdout + proc.stderr).strip().splitlines()
     print(f"  deploy: {out[-1] if out else f'exit {proc.returncode}'}")
+    mirror_repo()
+
+
+def mirror_repo():
+    """Commit and push the project (source + data.json) to the `pdku` remote."""
+    try:
+        subprocess.run(["git", "add", "-A"], cwd=BASE_DIR, check=True, timeout=30)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"], cwd=BASE_DIR, timeout=30
+        )
+        if staged.returncode == 0:
+            return  # nothing changed
+        subprocess.run(
+            ["git", "commit", "-q", "-m", f"sync {time.strftime('%Y-%m-%d %H:%M')}"],
+            cwd=BASE_DIR, check=True, timeout=30,
+        )
+        push = subprocess.run(
+            ["git", "push", "-q", "pdku", "HEAD:main"],
+            cwd=BASE_DIR, capture_output=True, text=True, timeout=60,
+        )
+        print(f"  mirror: {'pushed' if push.returncode == 0 else push.stderr.strip()[:80]}")
+    except Exception as exc:
+        print(f"  mirror failed: {exc}")
 
 
 def scrape_loop():
@@ -656,11 +689,12 @@ def scrape_loop():
                 snapshot = write_snapshot()
             total = sum(p["totalViews"] for p in snapshot["people"])
             video_total = sum(p["totalVideoViews"] for p in snapshot["people"])
+            settled = sum(1 for e in _videos.values() if e.get("settled"))
             print(
                 f"[{time.strftime('%H:%M:%S')}] scraped {len(snapshot['days'])} days, "
                 f"{len(snapshot['people'])} people, {total} portal views, "
                 f"{video_total} video views ({fetched} videos, "
-                f"{profiles_updated} profiles refreshed)"
+                f"{profiles_updated} profiles refreshed, {settled} settled)"
             )
             if DEPLOY:
                 try:
@@ -674,9 +708,10 @@ def scrape_loop():
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
             self._serve(BASE_DIR / "index.html", "text/html; charset=utf-8")
-        elif self.path == "/data.json":
+        elif path == "/data.json":
             self._serve(DATA_FILE, "application/json")
         else:
             self.send_error(404)

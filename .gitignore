@@ -1,5 +1,5 @@
-# runtime state / scraped caches (regenerated on each run)
-data.json
+# data.json is tracked on purpose: it mirrors what's live at natochi.cv/pdku
+# internal scraper caches stay out
 video_views.json
 followers.json
 
