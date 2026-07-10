@@ -625,19 +625,33 @@ def build_snapshot():
                 }
                 for h in prof["posts"]
             ]
-            # today's dashboard post can predate the cached profile
-            tp = person["daily"].get(today)
-            if tp and tp["url"] and all(x["url"] != tp["url"] for x in posts):
-                posts.append(
-                    {"day": today, "title": tp["title"], "url": tp["url"],
-                     "hidden": tp["hidden"]}
-                )
+            # the profile's SSR payload can lag the dashboard on any given day
+            # (edge cache), not just today - patch in whatever it's missing.
+            have_urls = {x["url"] for x in posts if x["url"]}
+            for day, d in person["daily"].items():
+                if d["url"] and d["url"] not in have_urls:
+                    posts.append(
+                        {"day": day, "title": d["title"], "url": d["url"],
+                         "hidden": d["hidden"]}
+                    )
+                    have_urls.add(d["url"])
         else:
             posts = [
                 {"day": day, "title": d["title"], "url": d["url"],
                  "hidden": d["hidden"]}
                 for day, d in person["daily"].items()
             ]
+        # the portal's own history can list the same video twice (re-shares,
+        # edits) - dedupe by URL so views aren't double-counted.
+        seen_urls = set()
+        deduped = []
+        for x in posts:
+            if x["url"]:
+                if x["url"] in seen_urls:
+                    continue
+                seen_urls.add(x["url"])
+            deduped.append(x)
+        posts = deduped
         for x in posts:
             entry = _videos.get(x["url"]) if x["url"] else None
             x["platform"] = platform_of(x["url"]) if x["url"] else None
