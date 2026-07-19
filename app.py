@@ -570,10 +570,31 @@ def day_range(start_key, end_key):
         d += timedelta(days=1)
 
 
+def followers_growth_baseline():
+    """Earliest known followers count (and its day) per slug, from history.json,
+    so build_snapshot() can report growth since that first sighting."""
+    baseline_followers = {}
+    baseline_day = {}
+    if HISTORY_FILE.exists():
+        try:
+            snaps = json.loads(HISTORY_FILE.read_text()).get("snapshots", [])
+        except Exception:
+            snaps = []
+        for snap in snaps:
+            for p in snap.get("people", []):
+                slug = p.get("slug")
+                f = p.get("followers")
+                if slug and f and slug not in baseline_followers:
+                    baseline_followers[slug] = f
+                    baseline_day[slug] = snap.get("day")
+    return baseline_followers, baseline_day
+
+
 def build_snapshot():
     people = {}
     platform_totals = {}
     day_keys = sorted(_days)
+    baseline_followers, baseline_day = followers_growth_baseline()
     for day_key in day_keys:
         for p in _days[day_key]:
             slug = p.get("slug")
@@ -698,6 +719,17 @@ def build_snapshot():
             round(person["totalVideoViews"] / max(person["followers"], 1000) ** 0.5, 1)
             if person["followers"] and person["trackedCount"] else None
         )
+        # growth since the earliest sighting we have in history.json
+        old_f = baseline_followers.get(person["slug"])
+        old_day = baseline_day.get(person["slug"])
+        if old_f and person["followers"] and old_day and old_day != today:
+            person["followersGrowth"] = person["followers"] - old_f
+            person["followersGrowthDays"] = (
+                date.fromisoformat(today) - date.fromisoformat(old_day)
+            ).days
+        else:
+            person["followersGrowth"] = None
+            person["followersGrowthDays"] = None
     return {
         "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "seasonStart": SEASON_START,

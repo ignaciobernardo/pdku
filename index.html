@@ -103,6 +103,27 @@
   td.dim, .dim { color: var(--muted); }
   #status { color: var(--muted); text-align: center; padding: 40px 0; }
 
+  #powerlaw { width: 100%; height: auto; display: block; overflow: visible; }
+  .pl-grid { stroke: var(--grid); stroke-width: 1; }
+  .pl-axis { stroke: var(--baseline); stroke-width: 1; }
+  .pl-line { stroke: var(--series); stroke-width: 2; fill: none; }
+  .pl-dot { fill: var(--series); }
+  .pl-dot:hover { fill: var(--ink); }
+  .pl-label { fill: var(--muted); font-size: 9.5px; }
+  .pl-caption { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .pl-avatar-ring { stroke: var(--surface); stroke-width: 1.5; fill: none; }
+  .pl-avatar-fallback { fill: var(--series-soft); stroke: var(--surface); stroke-width: 1.5; }
+  .pl-avatar-fallback-text { fill: var(--ink); font-size: 8px; font-weight: 600; text-anchor: middle; }
+  #powerlaw a { cursor: pointer; }
+  .pl-tooltip {
+    position: fixed; pointer-events: none; z-index: 50;
+    background: var(--ink); color: var(--page);
+    font-size: 11.5px; font-weight: 550; padding: 4px 8px; border-radius: 6px;
+    white-space: nowrap; transform: translate(-50%, -135%);
+    opacity: 0; transition: opacity 80ms ease;
+  }
+  .pl-tooltip.show { opacity: 1; }
+
   @media (max-width: 640px) {
     body { padding: 13px; }
     h1 { font-size: 16px; }
@@ -184,6 +205,21 @@
         <tbody id="rows"></tbody>
       </table>
     </div>
+
+    <div class="card">
+      <h2>Views distribution</h2>
+      <div class="controls" style="margin-bottom: 12px;">
+        <div class="seg" role="group" aria-label="Distribution mode">
+          <button id="dist-creators" aria-pressed="true">Creators</button>
+          <button id="dist-videos" aria-pressed="false">Videos</button>
+        </div>
+      </div>
+      <div style="position: relative;">
+        <svg id="powerlaw" viewBox="0 0 640 260" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Views by rank, log-log scale"></svg>
+        <div class="pl-tooltip" id="pl-tooltip"></div>
+      </div>
+      <div class="pl-caption" id="pl-caption"></div>
+    </div>
   </div>
 </div>
 
@@ -193,6 +229,7 @@ const POLL_MS = 300_000; // page checks for fresh data.json every 5 min
 let DATA = null;
 let range = "season"; // "season" | "momentum" | "ratio" | "strength"
 let platformFilter = "all";
+let distMode = "creators"; // "creators" | "videos"
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => n.toLocaleString("en-US");
@@ -221,7 +258,7 @@ function makeBarRow(value, max, exactLabel) {
   track.className = "bartrack";
   const bar = document.createElement("div");
   bar.className = "bar";
-  bar.style.width = `${Math.min(100, (value / max) * 100)}%`;
+  bar.style.width = `${Math.min(100, (Math.abs(value) / max) * 100)}%`;
   track.append(bar);
   const val = document.createElement("span");
   val.className = "barval";
@@ -298,6 +335,7 @@ function render() {
 
   renderPlatforms(totals);
   renderTable();
+  renderDistribution();
 
   const t = new Date(DATA.updatedAt);
   const secs = DATA.refreshSeconds || 0;
@@ -346,6 +384,171 @@ function renderPlatforms(totals) {
   $("ig-notice-text").textContent = igNeedsAuth
     ? "Instagram views need a logged-in session: log in to instagram.com in Zen and counts will appear on the next refresh."
     : `View counts are re-scraped on a ${cadence} cycle, so these figures reflect the latest daily pull rather than live numbers.`;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs) => {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+};
+
+// custom tooltip: shows instantly on pointer, unlike native <title> which the
+// browser delays ~1s before displaying
+function showTooltip(text, evt) {
+  const el = $("pl-tooltip");
+  el.textContent = text;
+  el.style.left = `${evt.clientX}px`;
+  el.style.top = `${evt.clientY}px`;
+  el.classList.add("show");
+}
+function hideTooltip() {
+  $("pl-tooltip").classList.remove("show");
+}
+
+// draws one marker: an avatar (clipped to a circle, initial-letter fallback
+// if no image) when there's room, otherwise a small dot — the log-x axis
+// compresses rank spacing fast, so avatars past the head of the curve just
+// pile on top of each other. Always wrapped in a link + instant tooltip.
+function appendMarker(svg, cx, cy, p, i, mode, asAvatar) {
+  const title = mode === "creators"
+    ? `${p.name} · ${fmt(p.views)} views`
+    : `${p.name} · Video #${p.videoIndex} · ${fmt(p.views)} views`;
+  const href = mode === "creators"
+    ? `https://portal.plzdontkillus.com/spring-26/${encodeURIComponent(p.slug)}`
+    : p.url;
+
+  const link = svgEl("a", { target: "_blank", rel: "noopener", "aria-label": title });
+  link.setAttributeNS("http://www.w3.org/1999/xlink", "href", href);
+  link.setAttribute("href", href);
+  link.addEventListener("pointerenter", (e) => showTooltip(title, e));
+  link.addEventListener("pointermove", (e) => showTooltip(title, e));
+  link.addEventListener("pointerleave", hideTooltip);
+
+  if (!asAvatar) {
+    link.append(svgEl("circle", { cx, cy, r: 2.6, class: "pl-dot" }));
+    svg.append(link);
+    return;
+  }
+
+  const r = mode === "creators" ? 9 : 7;
+  if (p.image) {
+    const clipId = `pl-clip-${mode}-${i}`;
+    const clip = svgEl("clipPath", { id: clipId });
+    clip.append(svgEl("circle", { cx, cy, r }));
+    svg.append(clip);
+    const img = svgEl("image", {
+      x: cx - r, y: cy - r, width: r * 2, height: r * 2,
+      "clip-path": `url(#${clipId})`, preserveAspectRatio: "xMidYMid slice",
+    });
+    img.setAttributeNS("http://www.w3.org/1999/xlink", "href", p.image);
+    img.setAttribute("href", p.image);
+    link.append(img);
+    link.append(svgEl("circle", { cx, cy, r, class: "pl-avatar-ring" }));
+  } else {
+    const c = svgEl("circle", { cx, cy, r, class: "pl-avatar-fallback" });
+    link.append(c);
+    const label = svgEl("text", { x: cx, y: cy + 3, class: "pl-avatar-fallback-text" });
+    label.textContent = (p.name || "?").slice(0, 1).toUpperCase();
+    link.append(label);
+  }
+  svg.append(link);
+}
+
+// log-log rank/views scatter — the classic power-law view: a straight-ish
+// downward line here means a few creators or videos carry most of the views.
+function renderDistribution() {
+  const svg = $("powerlaw");
+  if (!svg || !DATA) return;
+  svg.replaceChildren();
+  const W = 640, H = 260;
+  const M = { l: 46, r: 14, t: 22, b: 26 }; // avatars need headroom at the top
+
+  let points;
+  if (distMode === "creators") {
+    points = DATA.people
+      .filter((p) => p.totalVideoViews > 0)
+      .map((p) => ({ views: p.totalVideoViews, name: p.name, image: p.image, slug: p.slug }));
+    $("pl-caption").textContent =
+      "Every creator with tracked views, ranked by total views (log-log scale) — a small handful drive most of the season's reach. Hover or click an avatar for that creator's page.";
+  } else {
+    points = [];
+    for (const p of DATA.people) {
+      let videoIndex = 0;
+      for (const post of postsOf(p)) {
+        if (post.videoViews > 0) {
+          videoIndex++;
+          points.push({
+            views: post.videoViews,
+            name: p.name,
+            image: p.image,
+            slug: p.slug,
+            url: post.url,
+            videoIndex,
+          });
+        }
+      }
+    }
+    $("pl-caption").textContent =
+      "Every tracked video, ranked by views (log-log scale) — the steep drop-off is the power law: a small handful of videos account for most of the views. Each avatar is the creator; hover for which video, click to open it.";
+  }
+  points.sort((a, b) => b.views - a.views);
+
+  if (points.length < 2) {
+    const t = svgEl("text", { x: W / 2, y: H / 2, "text-anchor": "middle", class: "pl-label" });
+    t.textContent = distMode === "creators" ? "not enough tracked creators yet" : "not enough tracked videos yet";
+    svg.append(t);
+    return;
+  }
+
+  const n = points.length;
+  const maxViews = points[0].views;
+  const minViews = points[n - 1].views;
+  const logRankMax = Math.log10(n);
+  const logVMax = Math.log10(maxViews);
+  const logVMin = Math.log10(Math.max(minViews, 1));
+  const vSpan = logVMax - logVMin || 1;
+  const x = (rank) => M.l + (Math.log10(rank) / (logRankMax || 1)) * (W - M.l - M.r);
+  const y = (views) => H - M.b - ((Math.log10(views) - logVMin) / vSpan) * (H - M.t - M.b);
+
+  // y gridlines/ticks at powers of ten spanning the data
+  const yTicks = [];
+  for (let e = Math.floor(logVMin); e <= Math.ceil(logVMax); e++) {
+    const v = 10 ** e;
+    if (v >= minViews / 2 && v <= maxViews * 2) yTicks.push(v);
+  }
+  for (const v of yTicks) {
+    const yy = y(v);
+    svg.append(svgEl("line", { x1: M.l, x2: W - M.r, y1: yy, y2: yy, class: "pl-grid" }));
+    const t = svgEl("text", { x: M.l - 6, y: yy + 3, "text-anchor": "end", class: "pl-label" });
+    t.textContent = fmtCompact(v);
+    svg.append(t);
+  }
+  // x ticks at rank 1, 10, 100, ...
+  for (let e = 0; 10 ** e <= n; e++) {
+    const r = 10 ** e;
+    const xx = x(r);
+    const t = svgEl("text", { x: xx, y: H - M.b + 14, "text-anchor": "middle", class: "pl-label" });
+    t.textContent = `#${fmtCompact(r)}`;
+    svg.append(t);
+  }
+  svg.append(svgEl("line", { x1: M.l, x2: M.l, y1: M.t, y2: H - M.b, class: "pl-axis" }));
+  svg.append(svgEl("line", { x1: M.l, x2: W - M.r, y1: H - M.b, y2: H - M.b, class: "pl-axis" }));
+
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i + 1).toFixed(1)},${y(p.views).toFixed(1)}`).join(" ");
+  svg.append(svgEl("path", { d: path, class: "pl-line" }));
+
+  // markers: every point for creators (small list, always avatars). For
+  // videos (can run into the hundreds) only the head of the curve gets
+  // avatars — past rank 20 the log-x axis packs points too tight to tell
+  // them apart, so the rest render as small dots, sampled for readability.
+  const AVATAR_RANK_LIMIT = 20;
+  const step = distMode === "creators" ? 1 : Math.max(1, Math.floor(n / 200));
+  points.forEach((p, i) => {
+    if (distMode !== "creators" && i >= AVATAR_RANK_LIMIT && i % step !== 0) return;
+    const asAvatar = distMode === "creators" || i < AVATAR_RANK_LIMIT;
+    appendMarker(svg, x(i + 1), y(p.views), p, i, distMode, asAvatar);
+  });
 }
 
 function avatarFor(p) {
@@ -467,9 +670,12 @@ function renderTable() {
     { label: "Tracked", cls: "num col-hide-sm" },
   ]);
   const sorted = [...DATA.people].sort(
-    (a, b) => (personViews(b) ?? -1) - (personViews(a) ?? -1) || a.slug.localeCompare(b.slug)
+    (a, b) => (personViews(b) ?? -Infinity) - (personViews(a) ?? -Infinity) || a.slug.localeCompare(b.slug)
   );
-  const max = Math.max(1, ...sorted.map((p) => personViews(p) ?? 0));
+  const max = Math.max(
+    1,
+    ...sorted.map((p) => { const v = personViews(p); return v == null ? 0 : Math.abs(v); })
+  );
   rows.replaceChildren();
   sorted.forEach((p, i) => {
     const views = personViews(p);
@@ -548,7 +754,8 @@ function renderTable() {
       }
     } else {
       const exact = range === "ratio" || range === "strength" ? null
-        : (range === "momentum" ? "+" + fmt(views) + " views (24h)" : fmt(views) + " views");
+        : range === "momentum" ? "+" + fmt(views) + " views (24h)"
+        : fmt(views) + " views";
       barcell.appendChild(makeBarRow(views, max, exact));
       const latest = fPosts[fPosts.length - 1];
       if (latest) barcell.title = latest.hidden ? "(hidden post)" : latest.title;
@@ -598,7 +805,16 @@ $("btn-videos").addEventListener("click", () => setRange("videos"));
 $("platform-filter").addEventListener("change", (e) => {
   platformFilter = e.target.value;
   renderTable();
+  renderDistribution();
 });
+$("dist-creators").addEventListener("click", () => setDistMode("creators"));
+$("dist-videos").addEventListener("click", () => setDistMode("videos"));
+function setDistMode(m) {
+  distMode = m;
+  $("dist-creators").setAttribute("aria-pressed", String(m === "creators"));
+  $("dist-videos").setAttribute("aria-pressed", String(m === "videos"));
+  renderDistribution();
+}
 function setRange(r) {
   range = r;
   $("btn-season").setAttribute("aria-pressed", String(r === "season"));
