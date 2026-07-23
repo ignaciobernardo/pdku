@@ -781,7 +781,19 @@ function renderTable() {
     if (followers) {
       const partial = platformFilter === "all" && p.followersPartial;
       fol.textContent = fmtCompact(followers) + (partial ? "+" : "");
-      if (partial) fol.title = "some of their platforms don't expose follower counts";
+      const byPlatform = platformFilter === "all" ? (p.followersByPlatform || {}) : null;
+      const breakdown = byPlatform
+        ? PLATFORM_ORDER.filter((k) => byPlatform[k]).map((k) => `${PLATFORM_NAMES[k]} ${fmtCompact(byPlatform[k])}`)
+        : [];
+      if (breakdown.length > 1 || (breakdown.length === 1 && partial)) {
+        const text = breakdown.join(" · ") + (partial ? " · some platforms unknown" : "");
+        fol.addEventListener("pointerenter", (e) => showTooltip(text, e));
+        fol.addEventListener("pointermove", (e) => showTooltip(text, e));
+        fol.addEventListener("pointerleave", hideTooltip);
+        fol.style.cursor = "default";
+      } else if (partial) {
+        fol.title = "some of their platforms don't expose follower counts";
+      }
     } else {
       fol.textContent = "—";
       fol.classList.add("dim");
