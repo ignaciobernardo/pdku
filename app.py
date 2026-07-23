@@ -39,6 +39,7 @@ BASE_DIR = Path(__file__).parent
 DATA_FILE = BASE_DIR / "data.json"
 VIDEO_CACHE_FILE = BASE_DIR / "video_views.json"
 FOLLOWERS_FILE = BASE_DIR / "followers.json"
+AI_SAFETY_FILE = BASE_DIR / "ai_safety.json"
 # append-only time-series for charts (committed to the repo, unlike the caches)
 HISTORY_FILE = BASE_DIR / "history.json"
 
@@ -54,6 +55,7 @@ _days = {}  # dayKey -> list of participant dicts
 _videos = {}  # url -> {platform, views, fetchedAt, nextTry, creator}
 _creators = {}  # "platform:handle" -> {followers, fetchedAt}
 CREATOR_TTL_SECONDS = 20 * 3600  # follower counts refresh roughly per cycle
+_ai_safety_urls = set()  # video urls the portal's own feed tags as AI-safety content
 
 
 def parse_compact_count(text):
@@ -536,6 +538,11 @@ def load_video_cache():
             url = entry.get("url") or key
             entry.pop("url", None)
             _videos[url] = entry
+    if AI_SAFETY_FILE.exists():
+        try:
+            _ai_safety_urls.update(json.loads(AI_SAFETY_FILE.read_text()))
+        except Exception:
+            pass
     if FOLLOWERS_FILE.exists():
         try:
             _creators.update(json.loads(FOLLOWERS_FILE.read_text()))
@@ -559,6 +566,40 @@ def fetch_day(day_key=None):
     args = {"dayKey": day_key} if day_key else {}
     value = convex_query("publicDashboard:getDashboardData", args)
     return value["dayKey"], value.get("participants", [])
+
+
+def fetch_ai_safety_urls():
+    """The portal's own /feed page has an "AI safety" toggle backed by
+    feed:getPublicFeedPage's xriskOnly arg. Page through it (xriskOnly-filtered,
+    so the result set is small) to get the set of video urls it classifies as
+    AI-safety content."""
+    urls = set()
+    cursor = None
+    for _ in range(60):  # generous cap; xriskOnly already narrows the result set
+        args = {
+            "sort": "recent", "xriskOnly": True,
+            "paginationOpts": {"numItems": 100, "cursor": cursor},
+        }
+        value = convex_query("feed:getPublicFeedPage", args)
+        for item in value.get("page", []):
+            if item.get("url"):
+                urls.add(item["url"])
+            for extra in item.get("extraUrls") or []:
+                urls.add(extra)
+        if value.get("isDone"):
+            break
+        cursor = value.get("continueCursor")
+        if not cursor:
+            break
+    return urls
+
+
+def refresh_ai_safety():
+    global _ai_safety_urls
+    urls = fetch_ai_safety_urls()
+    _ai_safety_urls = urls
+    AI_SAFETY_FILE.write_text(json.dumps(sorted(urls)))
+    return len(urls)
 
 
 def day_range(start_key, end_key):
@@ -678,6 +719,7 @@ def build_snapshot():
             x["platform"] = platform_of(x["url"]) if x["url"] else None
             x["videoViews"] = entry.get("views") if entry else None
             x["momentum"] = post_momentum(entry)
+            x["aiSafety"] = bool(x["url"]) and x["url"] in _ai_safety_urls
             if x["url"]:
                 pt = platform_totals.setdefault(
                     x["platform"], {"views": 0, "videos": 0, "tracked": 0}
@@ -885,6 +927,11 @@ def scrape_loop():
                     break
             refresh_creators()
             FOLLOWERS_FILE.write_text(json.dumps(_creators))
+            try:
+                ai_safety_count = refresh_ai_safety()
+            except Exception as exc:
+                ai_safety_count = len(_ai_safety_urls)
+                print(f"  ai-safety fetch failed: {exc}")
             with _lock:
                 snapshot = write_snapshot()
                 days_logged = append_history(snapshot)
@@ -896,7 +943,7 @@ def scrape_loop():
                 f"{len(snapshot['people'])} people, {total} portal views, "
                 f"{video_total} video views ({fetched} videos, "
                 f"{profiles_updated} profiles refreshed, {settled} settled, "
-                f"{days_logged} days in history)"
+                f"{ai_safety_count} ai-safety urls, {days_logged} days in history)"
             )
             if DEPLOY:
                 try:

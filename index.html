@@ -75,6 +75,7 @@
     border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
     border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 12.5px; cursor: pointer;
   }
+  button.filter-select[aria-pressed="true"] { background: var(--series); color: #fff; border-color: var(--series); }
 
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; color: var(--muted); font-size: 11.5px; font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
@@ -199,6 +200,7 @@
           <option value="x">X</option>
           <option value="facebook">Facebook</option>
         </select>
+        <button id="btn-ai-safety" class="filter-select" aria-pressed="false">AI safety</button>
       </div>
       <table>
         <thead><tr id="head-row"></tr></thead>
@@ -230,6 +232,7 @@ let DATA = null;
 let range = "season"; // "season" | "momentum" | "ratio" | "strength"
 let platformFilter = "all";
 let distMode = "creators"; // "creators" | "videos"
+let aiSafetyOnly = false;
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => n.toLocaleString("en-US");
@@ -274,9 +277,19 @@ const PLATFORM_NAMES = {
 const PLATFORM_ORDER = ["youtube", "tiktok", "instagram", "x", "facebook", "other"];
 
 function postsOf(p) {
-  return platformFilter === "all"
-    ? p.posts
-    : p.posts.filter((x) => x.platform === platformFilter);
+  let posts = p.posts;
+  if (platformFilter !== "all") posts = posts.filter((x) => x.platform === platformFilter);
+  if (aiSafetyOnly) posts = posts.filter((x) => x.aiSafety);
+  return posts;
+}
+
+// tracked-views total for a person under the current filters (platform +
+// AI-safety) — mirrors personViews()'s "season" branch, but usable outside
+// the leaderboard too (the creators power-law chart needs it).
+function trackedViews(p) {
+  return postsOf(p)
+    .filter((x) => x.videoViews != null)
+    .reduce((s, x) => s + x.videoViews, 0);
 }
 
 function followersOf(p) {
@@ -467,8 +480,8 @@ function renderDistribution() {
   let points;
   if (distMode === "creators") {
     points = DATA.people
-      .filter((p) => p.totalVideoViews > 0)
-      .map((p) => ({ views: p.totalVideoViews, name: p.name, image: p.image, slug: p.slug }));
+      .map((p) => ({ views: trackedViews(p), name: p.name, image: p.image, slug: p.slug }))
+      .filter((p) => p.views > 0);
     $("pl-caption").textContent =
       "Every creator with tracked views, ranked by total views (log-log scale) — a small handful drive most of the season's reach. Hover or click an avatar for that creator's page.";
   } else {
@@ -594,9 +607,8 @@ function renderVideoTable() {
   ]);
   const vids = [];
   for (const p of DATA.people) {
-    for (const post of p.posts) {
+    for (const post of postsOf(p)) {
       if (post.videoViews == null || !post.url) continue;
-      if (platformFilter !== "all" && post.platform !== platformFilter) continue;
       vids.push({ p, post });
     }
   }
@@ -610,7 +622,7 @@ function renderVideoTable() {
     td.colSpan = 5;
     td.className = "dim";
     td.style.padding = "16px 8px";
-    td.textContent = "no tracked videos for this platform";
+    td.textContent = aiSafetyOnly ? "no tracked AI-safety videos for this filter" : "no tracked videos for this platform";
     tr.append(td);
     rows.append(tr);
     return;
@@ -733,7 +745,8 @@ function renderTable() {
     plats.appendChild(chips);
     tr.appendChild(plats);
 
-    const filterName = platformFilter === "all" ? "" : `${PLATFORM_NAMES[platformFilter]} `;
+    const filterName = (platformFilter === "all" ? "" : `${PLATFORM_NAMES[platformFilter]} `)
+      + (aiSafetyOnly ? "AI-safety " : "");
     const barcell = document.createElement("td");
     barcell.className = "barcell";
     if (views == null) {
@@ -804,6 +817,12 @@ $("btn-strong").addEventListener("click", () => setRange("strength"));
 $("btn-videos").addEventListener("click", () => setRange("videos"));
 $("platform-filter").addEventListener("change", (e) => {
   platformFilter = e.target.value;
+  renderTable();
+  renderDistribution();
+});
+$("btn-ai-safety").addEventListener("click", () => {
+  aiSafetyOnly = !aiSafetyOnly;
+  $("btn-ai-safety").setAttribute("aria-pressed", String(aiSafetyOnly));
   renderTable();
   renderDistribution();
 });
